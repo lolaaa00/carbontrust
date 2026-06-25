@@ -82,7 +82,16 @@ export async function getProjectCount(): Promise<number> {
 export async function getProjectsByOwner(ownerAddress: string): Promise<number[]> {
   try {
     const result = await callRead("get_projects_by_owner", [ownerAddress]);
-    return parseList<number>(result);
+    const projectIds = parseList<number>(result);
+    if (projectIds.length > 0) return projectIds;
+
+    // The deployed contract stores owner addresses as case-sensitive string keys,
+    // while wallets may return the same address with different casing.
+    const projects = await getAllProjects();
+    const normalizedOwner = ownerAddress.toLowerCase();
+    return projects
+      .filter((project) => project.owner.toLowerCase() === normalizedOwner)
+      .map((project) => project.id);
   } catch {
     return [];
   }
