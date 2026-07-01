@@ -53,7 +53,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
 
   const connect = useCallback(async () => {
     if (!hasEthereum) {
-      throw new Error("No wallet detected. Please install MetaMask.");
+      throw new Error("No injected wallet detected. Please install a Web3 wallet extension.");
     }
 
     setIsConnecting(true);

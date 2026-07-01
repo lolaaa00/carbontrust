@@ -4,8 +4,6 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect } from "react";
 import { X } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
 import { ConnectButton } from "@/components/wallet/connect-button";
 
 const navLinks = [
@@ -21,80 +19,109 @@ interface MobileNavProps {
 export function MobileNav({ open, onClose }: MobileNavProps) {
   const pathname = usePathname();
 
-  // Close on route change
-  useEffect(() => {
-    onClose();
-  }, [pathname, onClose]);
+  useEffect(() => { onClose(); }, [pathname, onClose]);
 
-  // Lock body scroll when open
   useEffect(() => {
     if (open) {
       document.body.style.overflow = "hidden";
-      return () => {
-        document.body.style.overflow = "";
-      };
+      return () => { document.body.style.overflow = ""; };
     }
   }, [open]);
 
   return (
     <div
-      className={cn(
-        "fixed inset-0 z-50 md:hidden",
-        open ? "pointer-events-auto" : "pointer-events-none"
-      )}
+      style={{
+        position: "fixed",
+        inset: 0,
+        zIndex: 200,
+        pointerEvents: open ? "auto" : "none",
+      }}
+      className="md:hidden"
       aria-hidden={!open}
     >
       {/* Backdrop */}
       <div
-        className={cn(
-          "absolute inset-0 bg-background/80 backdrop-blur-sm transition-opacity duration-300",
-          open ? "opacity-100" : "opacity-0"
-        )}
         onClick={onClose}
-        aria-label="Close menu"
+        style={{
+          position: "absolute",
+          inset: 0,
+          background: "rgba(7,45,51,0.7)",
+          backdropFilter: "blur(6px)",
+          opacity: open ? 1 : 0,
+          transition: "opacity 300ms",
+        }}
       />
 
       {/* Panel */}
       <nav
-        className={cn(
-          "absolute inset-y-0 right-0 w-3/4 max-w-sm border-l bg-background p-6 shadow-lg transition-transform duration-300 ease-in-out",
-          open ? "translate-x-0" : "translate-x-full"
-        )}
-        aria-label="Mobile navigation"
+        style={{
+          position: "absolute",
+          insetBlock: 0,
+          right: 0,
+          width: "75%",
+          maxWidth: "320px",
+          background: "var(--deep-2)",
+          borderLeft: "1px solid rgba(58,117,100,0.2)",
+          padding: "1.5rem",
+          boxShadow: "-8px 0 32px rgba(0,0,0,0.4)",
+          transform: open ? "translateX(0)" : "translateX(100%)",
+          transition: "transform 300ms ease-in-out",
+          display: "flex",
+          flexDirection: "column",
+          gap: "1.5rem",
+        }}
       >
-        <div className="flex items-center justify-between mb-8">
-          <span className="text-lg font-bold tracking-tight">
-            Carbon<span className="text-primary">Trust</span>
-          </span>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={onClose}
-            aria-label="Close menu"
+        {/* Header */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <span
+            style={{
+              fontFamily: "var(--sg)",
+              fontSize: "1.0625rem",
+              fontWeight: 700,
+              color: "var(--ct-text)",
+            }}
           >
-            <X className="h-5 w-5" />
-          </Button>
+            CarbonTrust
+          </span>
+          <button
+            onClick={onClose}
+            style={{ background: "none", border: "none", color: "var(--ct-text-2)", cursor: "pointer" }}
+          >
+            <X size={20} />
+          </button>
         </div>
 
-        <div className="flex flex-col gap-4">
+        {/* Links */}
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
           {navLinks.map((link) => (
             <Link
               key={link.href}
               href={link.href}
               onClick={onClose}
-              className={cn(
-                "rounded-md px-3 py-2 text-base font-medium transition-colors",
-                pathname === link.href || pathname?.startsWith(link.href + "/")
-                  ? "bg-accent text-foreground"
-                  : "text-muted-foreground hover:bg-accent hover:text-foreground"
-              )}
+              style={{
+                fontFamily: "var(--sg)",
+                fontSize: "1rem",
+                fontWeight: 500,
+                padding: "0.625rem 0.75rem",
+                borderRadius: "6px",
+                textDecoration: "none",
+                color:
+                  pathname === link.href || pathname?.startsWith(link.href + "/")
+                    ? "var(--ct-text)"
+                    : "var(--ct-text-2)",
+                background:
+                  pathname === link.href || pathname?.startsWith(link.href + "/")
+                    ? "rgba(58,117,100,0.12)"
+                    : "transparent",
+              }}
             >
               {link.label}
             </Link>
           ))}
         </div>
 
-        <div className="mt-8 pt-8 border-t">
+        {/* Wallet */}
+        <div style={{ borderTop: "1px solid rgba(58,117,100,0.15)", paddingTop: "1rem" }}>
           <ConnectButton />
         </div>
       </nav>
