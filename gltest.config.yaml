@@ -1,0 +1,18 @@
+# Schema verified against the installed gltest_cli package (gltest_cli/config/user.py):
+# top-level keys are exactly networks, paths, environment; `environment` is a path to
+# a dotenv file, not an inline map. `studionet`/`localnet` are preconfigured networks —
+# id/url here just pin them explicitly.
+networks:
+  default: studionet
+  studionet:
+    id: 61999
+    url: https://studio.genlayer.com/api
+  localnet:
+    id: 61999
+    url: http://127.0.0.1:4000/api
+
+paths:
+  contracts: contracts
+  artifacts: artifacts
+
+environment: .env.local

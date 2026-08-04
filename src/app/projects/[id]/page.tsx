@@ -14,15 +14,12 @@ import { EvidenceList } from "@/components/evidence/evidence-list";
 import { ConsensusSummary } from "@/components/consensus/consensus-summary";
 import { ConsensusHistory } from "@/components/consensus/consensus-history";
 import { TransactionStatus } from "@/components/shared/transaction-status";
-import { useWallet } from "@/lib/wallet/hooks";
-import { getProject, getProjectEvidence, getProjectAssessment, getAssessmentHistory } from "@/lib/contract/reads";
+import { useWallet, useTransactionFlow } from "@/lib/wallet/hooks";
+import { getProject, getProjectEvidence, getAssessmentHistory } from "@/lib/contract/reads";
 import { requestReview } from "@/lib/contract/writes";
-import { waitForReceipt } from "@/lib/contract/client";
-import { TransactionStatus as GenLayerTxStatus } from "genlayer-js/types";
 import type { Project } from "@/types/project";
 import type { Evidence } from "@/types/evidence";
 import type { Assessment } from "@/types/assessment";
-import type { TransactionStatus as TxStatusType } from "@/types/contract";
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -32,9 +29,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [loading, setLoading] = useState(true);
-  const [reviewTxStatus, setReviewTxStatus] = useState<TxStatusType>("idle");
-  const [reviewTxHash, setReviewTxHash] = useState<string>();
-  const [reviewTxError, setReviewTxError] = useState<string>();
 
   const loadData = useCallback(async () => {
     setLoading(true);
@@ -58,6 +52,19 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     loadData();
   }, [loadData]);
 
+  const {
+    status: reviewStatus,
+    hash: reviewHash,
+    error: reviewError,
+    execute: executeReview,
+    retry: retryReview,
+    reset: resetReview,
+  } = useTransactionFlow((finalStatus) => {
+    if (finalStatus === "accepted" || finalStatus === "finalized") {
+      setTimeout(() => loadData(), 2000);
+    }
+  });
+
   const latestAssessment = assessments.length > 0 ? assessments[assessments.length - 1] : null;
   const isOwner = project && address && project.owner.toLowerCase() === address.toLowerCase();
   const canRequestReview =
@@ -68,18 +75,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
   const handleRequestReview = async () => {
     if (!writeClient) return;
-    setReviewTxStatus("awaiting_signature");
-    try {
-      const hash = await requestReview(writeClient, projectId);
-      setReviewTxHash(hash);
-      setReviewTxStatus("pending");
-      await waitForReceipt(writeClient, hash, GenLayerTxStatus.ACCEPTED);
-      setReviewTxStatus("success");
-      setTimeout(() => loadData(), 2000);
-    } catch (err) {
-      setReviewTxStatus("failed");
-      setReviewTxError(err instanceof Error ? err.message : "Review request failed.");
-    }
+    await executeReview(() => requestReview(writeClient, projectId));
   };
 
   if (loading) {
@@ -120,7 +116,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           <div className="flex items-center gap-3">
             <ProjectStatusBadge status={project.status} />
             {canRequestReview && (
-              <Button onClick={handleRequestReview} disabled={reviewTxStatus !== "idle"}>
+              <Button onClick={handleRequestReview} disabled={reviewStatus !== "idle"}>
                 <Play className="mr-2 h-4 w-4" />
                 Request AI Review
               </Button>
@@ -135,18 +131,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         }
       />
 
-      {reviewTxStatus !== "idle" && (
+      {reviewStatus !== "idle" && (
         <Card className="mb-6">
           <CardContent className="p-4">
             <TransactionStatus
-              status={reviewTxStatus}
-              hash={reviewTxHash}
-              error={reviewTxError}
-              onDismiss={() => {
-                setReviewTxStatus("idle");
-                setReviewTxHash(undefined);
-                setReviewTxError(undefined);
-              }}
+              status={reviewStatus}
+              hash={reviewHash ?? undefined}
+              error={reviewError ?? undefined}
+              onRetry={retryReview}
+              onDismiss={resetReview}
             />
           </CardContent>
         </Card>

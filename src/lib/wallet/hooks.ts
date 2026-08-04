@@ -1,9 +1,9 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { TransactionStatus } from "genlayer-js/types";
 import { useWallet } from "@/components/wallet/wallet-provider";
-import { callRead, callWrite, waitForReceipt } from "@/lib/contract/client";
+import { callRead, pollTransactionStatus } from "@/lib/contract/client";
+import { fromGenLayerStatus, type TransactionStatus as TxStatus } from "@/types/contract";
 
 export { useWallet } from "@/components/wallet/wallet-provider";
 
@@ -44,21 +44,29 @@ export function useContractRead<T = unknown>(
   return { data, loading, error, refetch };
 }
 
-type WriteStatus = "idle" | "awaiting_signature" | "pending" | "success" | "failed";
-
-interface UseContractWriteResult {
-  execute: (functionName: string, args: unknown[]) => Promise<string>;
-  status: WriteStatus;
+interface UseTransactionFlowResult {
+  status: TxStatus;
   hash: string | null;
-  error: Error | null;
+  error: string | null;
+  /** Submits a write. `run` should call the contract and resolve with the tx hash. */
+  execute: (run: () => Promise<string>) => Promise<void>;
+  /** Re-submits the last `run`. Only meaningful once status is retryable (e.g. UNDETERMINED). */
+  retry: () => void;
   reset: () => void;
 }
 
-export function useContractWrite(): UseContractWriteResult {
+/**
+ * Drives a single write through the real GenLayer consensus lifecycle
+ * (PROPOSING -> COMMITTING -> REVEALING -> ACCEPTED/UNDETERMINED/...), not a
+ * generic spinner. UNDETERMINED / *_TIMEOUT resolve to a retryable status
+ * rather than "failed" — nothing was written in those cases.
+ */
+export function useTransactionFlow(onSettled?: (status: TxStatus) => void): UseTransactionFlowResult {
   const { writeClient } = useWallet();
-  const [status, setStatus] = useState<WriteStatus>("idle");
+  const [status, setStatus] = useState<TxStatus>("idle");
   const [hash, setHash] = useState<string | null>(null);
-  const [error, setError] = useState<Error | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const lastRunRef = useRef<(() => Promise<string>) | null>(null);
 
   const reset = useCallback(() => {
     setStatus("idle");
@@ -67,32 +75,44 @@ export function useContractWrite(): UseContractWriteResult {
   }, []);
 
   const execute = useCallback(
-    async (functionName: string, args: unknown[]): Promise<string> => {
+    async (run: () => Promise<string>) => {
       if (!writeClient) {
-        throw new Error("Wallet not connected");
+        setError("Wallet not connected.");
+        setStatus("failed");
+        return;
       }
 
-      reset();
+      lastRunRef.current = run;
+      setError(null);
+      setHash(null);
       setStatus("awaiting_signature");
 
       try {
-        const txHash = await callWrite(writeClient, functionName, args);
+        const txHash = await run();
         setHash(txHash);
         setStatus("pending");
 
-        await waitForReceipt(writeClient, txHash, TransactionStatus.ACCEPTED);
+        const finalGenLayerStatus = await pollTransactionStatus(writeClient, txHash, (statusName) => {
+          setStatus(fromGenLayerStatus(statusName));
+        });
 
-        setStatus("success");
-        return txHash;
+        const finalStatus = fromGenLayerStatus(finalGenLayerStatus);
+        setStatus(finalStatus);
+        onSettled?.(finalStatus);
       } catch (err) {
-        const thrownError = err instanceof Error ? err : new Error(String(err));
-        setError(thrownError);
+        setError(err instanceof Error ? err.message : "Transaction failed. Please try again.");
         setStatus("failed");
-        throw thrownError;
+        onSettled?.("failed");
       }
     },
-    [writeClient, reset],
+    [writeClient, onSettled],
   );
 
-  return { execute, status, hash, error, reset };
+  const retry = useCallback(() => {
+    if (lastRunRef.current) {
+      execute(lastRunRef.current);
+    }
+  }, [execute]);
+
+  return { status, hash, error, execute, retry, reset };
 }

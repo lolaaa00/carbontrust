@@ -8,20 +8,38 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { createReadClient, createWriteClient } from "@/lib/wallet/config";
+import { createAccount } from "genlayer-js";
+import { createReadClient, createWriteClient, createGeneratedWriteClient } from "@/lib/wallet/config";
 import { GENLAYER_CHAIN } from "@/lib/wallet/chains";
+import {
+  hasGeneratedAccount,
+  getOrCreateGeneratedPrivateKey,
+  getGeneratedPrivateKey,
+  isWarningAcknowledged,
+  acknowledgeWarning,
+  importGeneratedPrivateKey,
+} from "@/lib/wallet/generated-account";
 
 type GenLayerClient = ReturnType<typeof createReadClient>;
 type GenLayerWriteClient = ReturnType<typeof createWriteClient>;
+
+export type WalletMode = "none" | "injected" | "generated";
 
 interface WalletContextValue {
   address: `0x${string}` | null;
   chainId: number | null;
   isConnected: boolean;
   isConnecting: boolean;
+  mode: WalletMode;
+  hasInjectedWallet: boolean;
+  needsWarningAck: boolean;
   readClient: GenLayerClient;
   writeClient: GenLayerWriteClient | null;
   connect: () => Promise<void>;
+  connectGenerated: () => void;
+  acknowledgeGeneratedWarning: () => void;
+  exportPrivateKey: () => string | null;
+  importPrivateKey: (key: string) => void;
   disconnect: () => void;
 }
 
@@ -41,6 +59,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   const [chainId, setChainId] = useState<number | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [writeClient, setWriteClient] = useState<GenLayerWriteClient | null>(null);
+  const [mode, setMode] = useState<WalletMode>("none");
+  const [needsWarningAck, setNeedsWarningAck] = useState(false);
   const [readClient] = useState<GenLayerClient>(() => getReadClient());
 
   const hasEthereum = typeof window !== "undefined" && !!window.ethereum;
@@ -49,7 +69,55 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     setAddress(null);
     setChainId(null);
     setWriteClient(null);
+    setMode("none");
   }, []);
+
+  const loadGeneratedAccount = useCallback((privateKey: `0x${string}`) => {
+    const account = createAccount(privateKey);
+    setAddress(account.address as `0x${string}`);
+    setChainId(GENLAYER_CHAIN.id);
+    setWriteClient(createGeneratedWriteClient(privateKey));
+    setMode("generated");
+  }, []);
+
+  const connectGenerated = useCallback(() => {
+    if (!isWarningAcknowledged()) {
+      setNeedsWarningAck(true);
+      return;
+    }
+    const pk = getOrCreateGeneratedPrivateKey();
+    loadGeneratedAccount(pk);
+  }, [loadGeneratedAccount]);
+
+  const acknowledgeGeneratedWarning = useCallback(() => {
+    acknowledgeWarning();
+    setNeedsWarningAck(false);
+    const pk = getOrCreateGeneratedPrivateKey();
+    loadGeneratedAccount(pk);
+  }, [loadGeneratedAccount]);
+
+  const exportPrivateKey = useCallback((): string | null => {
+    return getGeneratedPrivateKey();
+  }, []);
+
+  const importPrivateKey = useCallback(
+    (key: string) => {
+      const pk = importGeneratedPrivateKey(key);
+      loadGeneratedAccount(pk);
+    },
+    [loadGeneratedAccount],
+  );
+
+  // Never silently regenerate: only resume a generated session that was
+  // already created and acknowledged in this browser.
+  useEffect(() => {
+    if (hasEthereum) return;
+    if (mode !== "none") return;
+    if (hasGeneratedAccount() && isWarningAcknowledged()) {
+      const pk = getGeneratedPrivateKey();
+      if (pk) loadGeneratedAccount(pk);
+    }
+  }, [hasEthereum, mode, loadGeneratedAccount]);
 
   const connect = useCallback(async () => {
     if (!hasEthereum) {
@@ -98,6 +166,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setAddress(addr);
       setChainId(parseInt(currentChainId, 16));
       setWriteClient(client);
+      setMode("injected");
     } finally {
       setIsConnecting(false);
     }
@@ -116,6 +185,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         setAddress(newAddr);
         const client = createWriteClient(newAddr, window.ethereum!);
         setWriteClient(client);
+        setMode("injected");
       }
     };
 
@@ -152,6 +222,7 @@ export function WalletProvider({ children }: { children: ReactNode }) {
           setAddress(addr);
           setChainId(parseInt(currentChainId, 16));
           setWriteClient(createWriteClient(addr, window.ethereum!));
+          setMode("injected");
         }
       } catch {
         // Silently fail - user hasn't connected yet
@@ -164,9 +235,16 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     chainId,
     isConnected: !!address,
     isConnecting,
+    mode,
+    hasInjectedWallet: hasEthereum,
+    needsWarningAck,
     readClient,
     writeClient,
     connect,
+    connectGenerated,
+    acknowledgeGeneratedWarning,
+    exportPrivateKey,
+    importPrivateKey,
     disconnect,
   };
 

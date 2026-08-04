@@ -1,42 +1,30 @@
 "use client";
 
-import { useState, use } from "react";
+import { use } from "react";
 import { useRouter } from "next/navigation";
 import { PageHeader } from "@/components/shared/page-header";
 import { EvidenceForm } from "@/components/evidence/evidence-form";
 import { TransactionStatus } from "@/components/shared/transaction-status";
 import { WalletGuard } from "@/components/wallet/wallet-guard";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
-import { useWallet } from "@/lib/wallet/hooks";
+import { useWallet, useTransactionFlow } from "@/lib/wallet/hooks";
 import { addEvidence } from "@/lib/contract/writes";
-import { waitForReceipt } from "@/lib/contract/client";
-import { TransactionStatus as GenLayerTxStatus } from "genlayer-js/types";
 import type { EvidenceFormData } from "@/lib/utils/validation";
-import type { TransactionStatus as TxStatusType } from "@/types/contract";
 
 export default function EvidencePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const projectId = Number(id);
   const router = useRouter();
   const { writeClient } = useWallet();
-  const [txStatus, setTxStatus] = useState<TxStatusType>("idle");
-  const [txHash, setTxHash] = useState<string>();
-  const [txError, setTxError] = useState<string>();
+  const { status, hash, error, execute, retry, reset } = useTransactionFlow((finalStatus) => {
+    if (finalStatus === "accepted" || finalStatus === "finalized") {
+      setTimeout(() => router.push(`/projects/${id}`), 2000);
+    }
+  });
 
   const handleSubmit = async (data: EvidenceFormData) => {
     if (!writeClient) return;
-    setTxStatus("awaiting_signature");
-    try {
-      const hash = await addEvidence(writeClient, projectId, data);
-      setTxHash(hash);
-      setTxStatus("pending");
-      await waitForReceipt(writeClient, hash, GenLayerTxStatus.ACCEPTED);
-      setTxStatus("success");
-      setTimeout(() => router.push(`/projects/${id}`), 2000);
-    } catch (err) {
-      setTxStatus("failed");
-      setTxError(err instanceof Error ? err.message : "Transaction failed. Please try again.");
-    }
+    await execute(() => addEvidence(writeClient, projectId, data));
   };
 
   return (
@@ -52,18 +40,15 @@ export default function EvidencePage({ params }: { params: Promise<{ id: string 
           ]}
         />
 
-        {txStatus !== "idle" ? (
+        {status !== "idle" ? (
           <Card>
             <CardContent className="p-6">
               <TransactionStatus
-                status={txStatus}
-                hash={txHash}
-                error={txError}
-                onDismiss={() => {
-                  setTxStatus("idle");
-                  setTxHash(undefined);
-                  setTxError(undefined);
-                }}
+                status={status}
+                hash={hash ?? undefined}
+                error={error ?? undefined}
+                onRetry={retry}
+                onDismiss={reset}
               />
             </CardContent>
           </Card>
