@@ -66,9 +66,9 @@ class CarbonTrustProtocol(gl.Contract):
     def __init__(self):
         self.project_count = u256(0)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Write Methods
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     @gl.public.write
     def create_project(
@@ -162,7 +162,7 @@ class CarbonTrustProtocol(gl.Contract):
         pid = int(project_id)
         project = self._require_project(pid)
 
-        # Anyone may contribute evidence — this is deliberate. Evidence types
+        # Anyone may contribute evidence - this is deliberate. Evidence types
         # include third_party_audit and community_observation, which only make
         # sense coming from someone other than the project owner. The frontend's
         # Add Evidence action is unrestricted to match; only request_review and
@@ -323,9 +323,9 @@ class CarbonTrustProtocol(gl.Contract):
 
         return self._json(assessment)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Read Methods
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     @gl.public.view
     def get_project(self, project_id: u256) -> str:
@@ -361,9 +361,9 @@ class CarbonTrustProtocol(gl.Contract):
     def get_projects_by_owner(self, owner_address: str) -> str:
         return self._json(self._get_owner_projects(owner_address))
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Non-deterministic Environmental Review
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _evaluate_environmental_evidence(
         self,
@@ -585,9 +585,9 @@ Mandatory equivalence rules:
                 "content_excerpt": self._clean(str(exc), 500),
             }
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Internal Read Helpers
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _get_project(self, pid: int):
         raw = self.projects.get(u256(pid), None)
@@ -617,9 +617,9 @@ Mandatory equivalence rules:
         raw = self.owner_projects.get(owner, "[]")
         return json.loads(raw)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Formatting Helpers
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _build_evidence_metadata_text(self, evidence_list: list) -> str:
         if not evidence_list:
@@ -683,9 +683,9 @@ Content Hash: {record.get("content_hash") or "not provided"}
 
         return "\n---\n".join(lines)
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Assessment Parsing / Normalization
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _parse_assessment(self, raw_result, valid_evidence_ids: set) -> dict:
         data = self._coerce_dict(raw_result)
@@ -785,9 +785,9 @@ Content Hash: {record.get("content_hash") or "not provided"}
                 result.append(cleaned)
         return result
 
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
     # Primitive Helpers
-    # ─────────────────────────────────────────────────────────────────────
+    # ---------------------------------------------------------------------
 
     def _json(self, value) -> str:
         return json.dumps(value, sort_keys=True)

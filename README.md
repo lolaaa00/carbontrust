@@ -131,7 +131,7 @@ The supplied `.env.example` configures:
 - GenLayer StudioNet RPC
 - Chain ID `61999`
 - GenLayer explorer
-- Deployed CarbonTrust contract: `0x990BF630724c1B636b19412B97Dc75F3F79CEFC7`
+- Deployed CarbonTrust contract: `0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6`
   ([view on explorer](https://explorer-studio.genlayer.com))
 
 Use a test-only wallet when interacting with StudioNet.
@@ -173,10 +173,42 @@ both a successful fetch and an unmocked/failed one) and a check that the
 contract discards a model-invented `evidence_id` in `source_findings` rather
 than trusting it.
 
-`tests/integration/` (real StudioNet consensus via `gltest --network
-studionet`) does not exist yet — direct-mode tests only. Real consensus runs
-take minutes each; run that pass separately before submitting and record the
-result here.
+### Integration test (real StudioNet consensus)
+
+```bash
+PYTHONIOENCODING=utf-8 .venv/bin/python -m pytest tests/integration/ -v -s --network studionet
+```
+
+Deploys a fresh contract instance and walks the full lifecycle — create a
+project, submit evidence pointing at a real public URL
+(`en.wikipedia.org/wiki/Congo_Basin`), request a review, wait for real
+validators. **Run and passed:** 1 test, real consensus, **229.63s**. The
+deploy transaction itself resolved with 5 real validators voting
+`MAJORITY_AGREE` (4 `AGREE`, 1 `IDLE`) to `ACCEPTED`, matching the spec's
+documented StudioNet behavior that `IDLE`/`DISAGREE` votes alongside quorum
+`ACCEPTED` are the equivalence principle working, not a fault.
+
+**StudioNet enforces a 30 requests/minute rate limit per client** — discovered
+by hitting it directly while tuning this test's polling. This isn't
+documented anywhere obvious; if you write more integration tests, pace writes
+with deliberate delays (see `RATE_LIMIT_PACING_SECONDS` in the test file)
+rather than assuming a faster poll interval is free.
+
+**A real, non-hypothetical bug was found and fixed by running this suite
+against live infrastructure**, not by reading the code: `add_evidence` was
+owner-only in the contract, which directly contradicted the frontend (its Add
+Evidence action is shown to every visitor, not just the owner) and the
+evidence-type set itself (`third_party_audit`, `community_observation` only
+make sense from a non-owner). Also found: the contract source contained
+Unicode box-drawing characters and em-dashes in comments that broke
+`get_contract_schema_for_code` over the wire with `UnicodeEncodeError` in
+this Python client — the contract has since been rewritten as pure ASCII and
+redeployed. **The previously-referenced test file
+(`genlayer_test.direct`) imported a module that doesn't exist and called
+`expect_revert` as a bare statement instead of a context manager — it could
+never have actually run.** All of this is now fixed and verified: 30/30
+direct tests pass, the integration test passes, and the redeployed contract's
+schema matches the frontend exactly (`npm run verify:schema`).
 
 ## Documentation
 
@@ -196,11 +228,13 @@ result here.
   records is stored and shown to the model as claimed metadata, but nothing in
   the contract computes a hash of the fetched body and compares it — treat it
   as a claim, not a proof, until that's added.
-- **No integration tests against real StudioNet consensus yet.** `genvm-lint`
-  and 30 direct-mode tests pass (see Contract Tests above); a `gltest
-  tests/integration/ --network studionet` pass exercising real multi-minute
-  consensus has not been written or run.
 - **No demo video or public post yet.**
+- **StudioNet's 30 req/min rate limit is real and unannounced.** A user
+  performing several operations in quick succession (or a frontend polling
+  loop combined with other reads) can hit it. Not yet mitigated with
+  client-side backoff/retry in the frontend — a genuine `429`-equivalent from
+  the RPC currently surfaces as a generic transaction failure rather than a
+  "please wait" message.
 - **Native GEN is not used anywhere in this contract.** The decision record
   names value-bearing alternatives that were considered and why this one was
   picked over them; extending `request_review`'s verdict into an escrow/refund
