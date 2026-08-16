@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { VALID_PROJECT_TYPES } from "@/lib/constants/project-types";
 import { VALID_EVIDENCE_TYPES } from "@/lib/constants/evidence-types";
+import { VALID_MONITORING_RISK_SIGNALS } from "@/lib/constants/monitoring";
 
 export const projectFormSchema = z.object({
   title: z.string().min(5, "Title must be at least 5 characters").max(200),
@@ -33,5 +34,20 @@ export const evidenceFormSchema = z.object({
   ),
 });
 
+export const monitoringFormSchema = z.object({
+  period_label: z.string().min(2).max(120),
+  observation_summary: z.string().min(10).max(1000),
+  evidence_url: z.string().url("Must be a valid URL").refine((u) => u.startsWith("https://"), {
+    message: "URL must use HTTPS",
+  }),
+  content_hash: z
+    .string()
+    .regex(/^([a-fA-F0-9]{64}|Qm[a-zA-Z0-9]{44}|bafy[a-zA-Z0-9]+)?$/, "Invalid hash format")
+    .optional()
+    .or(z.literal("")),
+  risk_signal: z.enum(VALID_MONITORING_RISK_SIGNALS as unknown as [string, ...string[]]),
+});
+
 export type ProjectFormData = z.infer<typeof projectFormSchema>;
 export type EvidenceFormData = z.infer<typeof evidenceFormSchema>;
+export type MonitoringFormData = z.infer<typeof monitoringFormSchema>;

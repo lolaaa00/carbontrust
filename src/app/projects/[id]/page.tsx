@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, use } from "react";
 import Link from "next/link";
-import { Plus, Play } from "lucide-react";
+import { Plus, Play, Activity } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Card, CardContent } from "@/components/ui/card";
@@ -11,15 +11,17 @@ import { EmptyState } from "@/components/shared/empty-state";
 import { ProjectOverview } from "@/components/project/project-overview";
 import { ProjectStatusBadge } from "@/components/project/project-status-badge";
 import { EvidenceList } from "@/components/evidence/evidence-list";
+import { MonitoringRecordList } from "@/components/monitoring/monitoring-record-list";
 import { ConsensusSummary } from "@/components/consensus/consensus-summary";
 import { ConsensusHistory } from "@/components/consensus/consensus-history";
 import { TransactionStatus } from "@/components/shared/transaction-status";
 import { useWallet, useTransactionFlow } from "@/lib/wallet/hooks";
-import { getProject, getProjectEvidence, getAssessmentHistory } from "@/lib/contract/reads";
+import { getProject, getProjectEvidence, getAssessmentHistory, getMonitoringRecords } from "@/lib/contract/reads";
 import { requestReview } from "@/lib/contract/writes";
 import type { Project } from "@/types/project";
 import type { Evidence } from "@/types/evidence";
 import type { Assessment } from "@/types/assessment";
+import type { MonitoringRecord } from "@/types/monitoring";
 
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
@@ -28,19 +30,22 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [project, setProject] = useState<Project | null>(null);
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [monitoringRecords, setMonitoringRecords] = useState<MonitoringRecord[]>([]);
   const [loading, setLoading] = useState(true);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [p, ev, hist] = await Promise.all([
+      const [p, ev, hist, monitoring] = await Promise.all([
         getProject(projectId),
         getProjectEvidence(projectId),
         getAssessmentHistory(projectId),
+        getMonitoringRecords(projectId),
       ]);
       setProject(p);
       setEvidence(ev);
       setAssessments(hist);
+      setMonitoringRecords(monitoring);
     } catch {
       setProject(null);
     } finally {
@@ -127,6 +132,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 Add Evidence
               </Link>
             </Button>
+            {isOwner && (
+              <Button variant="outline" asChild>
+                <Link href={`/projects/${id}/monitoring`}>
+                  <Activity className="mr-2 h-4 w-4" />
+                  Add Monitoring Record
+                </Link>
+              </Button>
+            )}
           </div>
         }
       />
@@ -149,6 +162,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         <TabsList>
           <TabsTrigger value="overview">Overview</TabsTrigger>
           <TabsTrigger value="evidence">Evidence ({evidence.length})</TabsTrigger>
+          <TabsTrigger value="monitoring">Monitoring ({monitoringRecords.length})</TabsTrigger>
           <TabsTrigger value="assessment">Assessment</TabsTrigger>
           <TabsTrigger value="history">History ({assessments.length})</TabsTrigger>
         </TabsList>
@@ -173,6 +187,31 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
             />
           ) : (
             <EvidenceList evidence={evidence} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="monitoring">
+          {monitoringRecords.length === 0 ? (
+            <EmptyState
+              title="No Monitoring Records"
+              description={
+                isOwner
+                  ? "Add periodic monitoring observations to track this project over time."
+                  : "The project owner hasn't submitted any monitoring records yet."
+              }
+              action={
+                isOwner ? (
+                  <Button asChild>
+                    <Link href={`/projects/${id}/monitoring`}>
+                      <Activity className="mr-2 h-4 w-4" />
+                      Submit Monitoring Record
+                    </Link>
+                  </Button>
+                ) : undefined
+              }
+            />
+          ) : (
+            <MonitoringRecordList records={monitoringRecords} />
           )}
         </TabsContent>
 

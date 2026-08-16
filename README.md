@@ -98,6 +98,7 @@ with a Retry action, not failures — nothing was written in those cases.
   model as claimed metadata; not independently verified against fetched bytes —
   see Honest limits)
 - Owner-only: attach ongoing monitoring records against a project over time
+  (`/projects/[id]/monitoring`), shown on a dedicated Monitoring tab
 - Owner-only: request AI-validator consensus assessments
 - Review carbon estimates, confidence, biodiversity, and risk indicators
 - Browse projects and assessment history on-chain, with deep links to every
@@ -195,10 +196,6 @@ result here.
   records is stored and shown to the model as claimed metadata, but nothing in
   the contract computes a hash of the fetched body and compares it — treat it
   as a claim, not a proof, until that's added.
-- **No monitoring-record UI yet.** `add_monitoring_record` and
-  `get_monitoring_records` exist on the contract and are wired in
-  `src/lib/contract/{reads,writes}.ts`, but there is no form/page to submit one
-  from the frontend yet — only project creation and evidence submission have UI.
 - **No integration tests against real StudioNet consensus yet.** `genvm-lint`
   and 30 direct-mode tests pass (see Contract Tests above); a `gltest
   tests/integration/ --network studionet` pass exercising real multi-minute
