@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
+import { CONTRACT_ADDRESS } from "@/lib/contract/address";
+import { truncateAddress } from "@/lib/wallet/utils";
 
 /* ── Pipeline stage config ── */
 const PIPE_STAGES = [
@@ -533,7 +535,7 @@ export default function HomePage() {
 
               <div style={{ marginTop: "1.25rem", fontFamily: "var(--mono)", fontSize: ".62rem", color: "var(--ct-text-3)" }}>
                 Missing evidence: Long-term soil carbon sampling data<br />
-                Contract: 0x02D4...3520D · Block: 14,847,291 · StudioNet
+                Sample assessment · Contract: {CONTRACT_ADDRESS ? truncateAddress(CONTRACT_ADDRESS) : "not configured"} · StudioNet
               </div>
             </div>
           </div>
