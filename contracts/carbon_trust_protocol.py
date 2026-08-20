@@ -3,8 +3,8 @@
 
 from genlayer import *
 from dataclasses import dataclass
-import json
 import hashlib
+import json
 
 
 VALID_PROJECT_TYPES = [
@@ -165,15 +165,14 @@ class CarbonTrustProtocol(gl.Contract):
 
         # Anyone may contribute evidence - this is deliberate. Evidence types
         # include third_party_audit and community_observation, which only make
-        # sense coming from someone other than the project owner. The frontend's
-        # Add Evidence action is unrestricted to match; only request_review and
-        # add_monitoring_record are owner-only.
+        # sense coming from someone other than the project owner.
         sender = str(gl.message.sender_address)
 
         if project["status"] == "review_requested":
             raise gl.vm.UserError("EXPECTED: Cannot add evidence while review is in progress")
+
         if project["status"] == "flagged":
-            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud risk and is locked")
+            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud and is locked")
 
         evidence_type = self._clean(evidence_type, 80)
         title = self._clean(title, MAX_TITLE_LENGTH)
@@ -221,7 +220,7 @@ class CarbonTrustProtocol(gl.Contract):
         self.evidence[u256(pid)] = self._json(evidence_list)
 
         project["evidence_count"] = len(evidence_list)
-        if project["status"] in ("created", "assessed"):
+        if project["status"] in ("created", "assessed", "verified"):
             project["status"] = "evidence_submitted"
 
         self.projects[u256(pid)] = self._json(project)
@@ -243,6 +242,9 @@ class CarbonTrustProtocol(gl.Contract):
         sender = str(gl.message.sender_address)
         if project["owner"] != sender:
             raise gl.vm.UserError("EXPECTED: Only the project owner can add monitoring records")
+
+        if project["status"] == "flagged":
+            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud and is locked")
 
         period_label = self._clean(period_label, 120)
         observation_summary = self._clean(observation_summary, MAX_FIELD_LENGTH)
@@ -294,7 +296,8 @@ class CarbonTrustProtocol(gl.Contract):
             raise gl.vm.UserError("EXPECTED: Only the project owner can request review")
 
         if project["status"] == "flagged":
-            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud risk and cannot be re-reviewed")
+            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud and is permanently locked")
+
         if project["status"] not in ("evidence_submitted", "assessed", "verified"):
             raise gl.vm.UserError("EXPECTED: Project must have evidence submitted before review")
 
@@ -324,10 +327,11 @@ class CarbonTrustProtocol(gl.Contract):
         project["assessment_count"] = len(assessment_list)
         project["latest_assessment_id"] = assessment_id
 
+        # Bind verdict to a concrete contested consequence.
+        # high_fraud_risk permanently locks the project - no further evidence
+        # or re-review is permitted once validators agree on this verdict.
         verdict = assessment.get("verdict", "")
         if verdict == "high_fraud_risk":
-            # Fraud verdict is a contested consequence: project is permanently locked.
-            # No further evidence or re-review is permitted once validators agree on fraud.
             project["status"] = "flagged"
         elif verdict == "high_confidence":
             project["status"] = "verified"
@@ -388,28 +392,35 @@ class CarbonTrustProtocol(gl.Contract):
     ) -> dict:
         metadata_text = self._build_evidence_metadata_text(evidence_list)
         monitoring_text = self._build_monitoring_text(monitoring_list)
+        fetch_limit = min(len(evidence_list), MAX_FETCH_PER_REVIEW)
+        valid_evidence_ids = {evidence_list[i]["evidence_id"] for i in range(fetch_limit)}
 
         def evaluate():
-            fetched_items = []
+            # Step 1: Fetch all evidence and compute authoritative metadata from
+            # the actual response objects. These facts are computed here, inside
+            # the nondet closure so each validator runs them independently, but
+            # they are computed from the raw response - not asked of the model.
+            fetch_records = {}   # evidence_id -> authoritative facts (not from model)
+            fetched_items = []   # for building the model prompt
 
-            fetch_limit = min(len(evidence_list), MAX_FETCH_PER_REVIEW)
             for i in range(fetch_limit):
                 ev = evidence_list[i]
-                fetched = self._fetch_public_evidence(ev["url"], ev.get("content_hash", ""))
+                ev_id = ev["evidence_id"]
+                auth = self._fetch_with_assurance(ev["url"], ev.get("content_hash", ""))
+                fetch_records[ev_id] = auth
                 fetched_items.append({
-                    "evidence_id": ev["evidence_id"],
+                    "evidence_id": ev_id,
                     "evidence_type": ev["evidence_type"],
                     "title": ev["title"],
                     "declared_source_name": ev["source_name"],
                     "url": ev["url"],
-                    "fetch_status": fetched["fetch_status"],
-                    "http_status": fetched["http_status"],
-                    "content_type": fetched["content_type"],
-                    "fetched_domain": fetched["fetched_domain"],
-                    "hash_match": fetched["hash_match"],
-                    "content_excerpt": fetched["content_excerpt"],
+                    **auth,
                 })
 
+            # Step 2: Build prompt and ask the model for semantic judgment only.
+            # The model sees the fetch facts so it can reason about them, but
+            # it is NOT asked to reproduce them in output - only source_alignment,
+            # credibility, and key_observation come from the model.
             fetched_text = self._build_fetched_evidence_text(fetched_items)
 
             prompt = f"""
@@ -418,7 +429,7 @@ You are an expert environmental scientist, carbon credit auditor, biodiversity a
 You are evaluating a carbon impact project using:
 1. Project claims.
 2. Evidence metadata submitted on-chain.
-3. Public evidence content fetched directly from source URLs.
+3. Public evidence content fetched directly from source URLs, with verified HTTP status, content hash, and domain.
 4. Monitoring records where available.
 
 Your role is not to force certainty. Preserve uncertainty where evidence is weak, conflicting, incomplete, outdated, or not fetchable.
@@ -449,6 +460,7 @@ SUBMITTED EVIDENCE METADATA
 {metadata_text}
 
 FETCHED PUBLIC EVIDENCE CONTENT
+Each item includes the verified HTTP status, content hash result, and fetched domain.
 {fetched_text}
 
 MONITORING RECORDS
@@ -477,33 +489,11 @@ confidence_score:
 - 25-49: weak support.
 - 0-24: insufficient or mostly unsupported.
 
-additionality:
-- likely
-- unlikely
-- uncertain
-
-environmental_risk:
-- low
-- medium
-- high
-- critical
-
-evidence_quality:
-- high
-- moderate
-- low
-- insufficient
-
-fraud_risk:
-- low
-- medium
-- high
-
-biodiversity_impact:
-- positive
-- neutral
-- negative
-- uncertain
+additionality: likely | unlikely | uncertain
+environmental_risk: low | medium | high | critical
+evidence_quality: high | moderate | low | insufficient
+fraud_risk: low | medium | high
+biodiversity_impact: positive | neutral | negative | uncertain
 
 verdict:
 - high_confidence
@@ -513,31 +503,27 @@ verdict:
 - high_fraud_risk
 
 SOURCE ASSURANCE RULES
-- HTTP Status: A non-200 HTTP Status means the evidence URL was not publicly accessible at
-  review time. Treat that evidence item as failed regardless of what the submitter claims.
-  A 4xx means the URL is broken or access-denied; a 5xx means a server fault. Both reduce
-  credibility to unknown and evidence quality toward insufficient.
-- Content Hash Verification: If hash_match is "mismatch", the fetched content does not match
-  what the submitter declared. This may indicate tampering or link rot. Reduce credibility and
-  flag in source_findings. If hash_match is "match", the content is confirmed unchanged from
-  what was declared. If hash_match is "not_provided", no integrity check was possible.
-- Source Identity: Compare Declared Source Name against Fetched Domain. If they are clearly
-  inconsistent (e.g., declared "NASA Satellite Data" but fetched domain is a personal blog),
-  that is a credibility flag. Consistent alignment (e.g., "Wikipedia" with en.wikipedia.org)
-  supports credibility.
-- Binary Content: A fetch_status of "binary" means the file is a PDF or image that could not
-  be read as text. Only the hash_match result provides integrity assurance. Without a matching
-  hash, binary evidence must be treated as unverifiable and credibility set to unknown.
+- HTTP Status: A non-200 HTTP Status means the URL was not accessible at review time.
+  4xx = broken or access-denied; 5xx = server fault. Both reduce credibility to unknown.
+- Content Hash: hash_match=mismatch means the fetched content differs from what was declared -
+  possible tampering or link rot. hash_match=match confirms integrity. hash_match=not_provided
+  means no hash was declared.
+- Source Identity: Compare Declared Source Name against Fetched Domain. A clear mismatch
+  (declared "NASA" but domain is a personal blog) is a credibility flag.
+- Binary Content: fetch_status=binary means PDF or image - no text was extracted. Only
+  hash_match provides integrity assurance. Without a matching hash, treat as unverifiable.
 
 IMPORTANT RULES
 - If evidence URLs are mostly unfetchable or returned non-200, reduce evidence quality and confidence.
 - If claims are large but evidence is vague, use conservative carbon estimates.
 - If evidence conflicts, preserve the uncertainty in reasoning.
 - Do not invent facts that are not in the submitted metadata or fetched evidence.
-- Keep source_findings short and tied to evidence IDs.
 - Return only valid JSON.
 
 OUTPUT JSON SCHEMA
+Note: fetch_status, http_status, hash_match, and fetched_domain are enforced by the
+contract from the actual response - do not include them in source_findings output.
+Only provide source_alignment, credibility, and key_observation per evidence item.
 {{
   "verdict": "<high_confidence|moderate_confidence|low_confidence|insufficient_evidence|high_fraud_risk>",
   "carbon_estimate_low": <int>,
@@ -554,9 +540,6 @@ OUTPUT JSON SCHEMA
   "source_findings": [
     {{
       "evidence_id": <int>,
-      "fetch_status": "<fetched|failed|binary>",
-      "http_status": "<e.g. 200, 404, error>",
-      "hash_match": "<match|mismatch|not_provided>",
       "source_alignment": "<supports|contradicts|mixed|unclear>",
       "credibility": "<high|moderate|low|unknown>",
       "key_observation": "<short observation>"
@@ -567,7 +550,13 @@ OUTPUT JSON SCHEMA
   "reasoning": "<2-4 sentence overall reasoning>"
 }}
 """
-            return gl.nondet.exec_prompt(prompt, response_format="json")
+            model_result = gl.nondet.exec_prompt(prompt, response_format="json")
+
+            # Step 3: Parse model result and bind authoritative fetch facts over
+            # whatever the model returned. The model contributes only semantic
+            # fields (source_alignment, credibility, key_observation). Every
+            # observable fact about the fetch comes from fetch_records.
+            return self._parse_and_bind_assessment(model_result, fetch_records, valid_evidence_ids)
 
         principle = """
 Two CarbonTrust assessments are equivalent if they reach the same directional environmental judgment.
@@ -582,37 +571,35 @@ Mandatory equivalence rules:
 7. fraud_risk may differ by at most one level.
 8. permanence_confidence must be within 20 points.
 9. biodiversity_impact must match, unless one side is uncertain.
-10. source_findings may use different wording, but must agree directionally on whether key evidence supports, contradicts, is mixed, or is unclear.
+10. source_findings may use different wording, but must agree directionally on source_alignment per evidence item.
 11. reasoning may differ in wording, but must not contradict the core verdict, risk, confidence, additionality, or fraud conclusions.
 """
 
-        raw_result = gl.eq_principle.prompt_comparative(
-            evaluate,
-            principle=principle,
-        )
+        return gl.eq_principle.prompt_comparative(evaluate, principle=principle)
 
-        fetch_limit = min(len(evidence_list), MAX_FETCH_PER_REVIEW)
-        valid_evidence_ids = {evidence_list[i]["evidence_id"] for i in range(fetch_limit)}
-
-        return self._parse_assessment(raw_result, valid_evidence_ids)
-
-    def _fetch_public_evidence(self, url: str, declared_content_hash: str = "") -> dict:
+    def _fetch_with_assurance(self, url: str, declared_content_hash: str = "") -> dict:
+        """
+        Fetch a public URL and return authoritative source assurance metadata.
+        Hash is computed from raw bytes before any text decoding to avoid lossy
+        hash computation. These facts are bound directly into stored findings
+        and cannot be overridden by the model.
+        """
         domain = self._extract_domain(url)
         try:
             response = gl.nondet.web.get(url)
             status = self._safe_status(response)
             status_code = self._parse_status_code(status)
             content_type = self._safe_content_type(response)
-            body = self._safe_body(response)
 
-            # Hash verification: compare declared hash against actual fetched bytes.
+            # Hash from raw bytes BEFORE any decoding - lossy text decode would
+            # produce a different hash than what was declared against raw content.
+            raw_bytes = self._safe_raw_body(response)
             hash_match = "not_provided"
-            if declared_content_hash:
-                actual_hash = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()
+            if declared_content_hash and raw_bytes is not None:
+                actual_hash = hashlib.sha256(raw_bytes).hexdigest()
                 hash_match = "match" if actual_hash == declared_content_hash.lower() else "mismatch"
 
-            # Non-200 means the URL is not properly accessible; treat as failed
-            # regardless of whether a body was returned.
+            # Non-200: URL is not publicly accessible at review time.
             if status_code is not None and status_code != 200:
                 return {
                     "fetch_status": "failed",
@@ -620,12 +607,10 @@ Mandatory equivalence rules:
                     "content_type": content_type,
                     "fetched_domain": domain,
                     "hash_match": hash_match,
-                    "content_excerpt": (
-                        f"HTTP {status_code} response: evidence URL is not publicly accessible."
-                    ),
+                    "content_excerpt": f"HTTP {status_code}: evidence URL was not publicly accessible.",
                 }
 
-            # Binary content (PDFs, images) cannot be read as text.
+            # Binary: PDF/image/audio/video cannot be read as text.
             if self._is_binary_content_type(content_type):
                 return {
                     "fetch_status": "binary",
@@ -634,12 +619,18 @@ Mandatory equivalence rules:
                     "fetched_domain": domain,
                     "hash_match": hash_match,
                     "content_excerpt": (
-                        f"Binary content ({content_type}): text extraction is not supported. "
-                        "The hash match result above is the integrity check for this file."
+                        f"Binary content ({content_type}): text extraction skipped. "
+                        "Hash integrity check result is shown above."
                     ),
                 }
 
-            excerpt = self._clean(body, MAX_FETCH_CHARS_PER_EVIDENCE)
+            # Decode for model prompt (lossy decode is acceptable for text display).
+            body_text = (
+                raw_bytes.decode("utf-8", errors="ignore")
+                if isinstance(raw_bytes, bytes)
+                else str(raw_bytes or "")
+            )
+            excerpt = self._clean(body_text, MAX_FETCH_CHARS_PER_EVIDENCE)
             if not excerpt:
                 return {
                     "fetch_status": "failed",
@@ -770,10 +761,17 @@ Content Hash: {record.get("content_hash") or "not provided"}
         return "\n---\n".join(lines)
 
     # ---------------------------------------------------------------------
-    # Assessment Parsing / Normalization
+    # Assessment Parsing / Binding
     # ---------------------------------------------------------------------
 
-    def _parse_assessment(self, raw_result, valid_evidence_ids: set) -> dict:
+    def _parse_and_bind_assessment(self, raw_result, fetch_records: dict, valid_evidence_ids: set) -> dict:
+        """
+        Parse the model's semantic output and bind authoritative fetch facts
+        from fetch_records over the model's source_findings. The model can only
+        influence source_alignment, credibility, and key_observation. Everything
+        observable about the actual fetch (fetch_status, http_status, hash_match,
+        fetched_domain) is taken from fetch_records, not from the model.
+        """
         data = self._coerce_dict(raw_result)
 
         valid_verdicts = (
@@ -789,15 +787,19 @@ Content Hash: {record.get("content_hash") or "not provided"}
         valid_fraud_risk = ("low", "medium", "high")
         valid_biodiversity = ("positive", "neutral", "negative", "uncertain")
 
-        carbon_low = self._clamp(data.get("carbon_estimate_low", 0), 0, 100000000)
-        carbon_high = self._clamp(data.get("carbon_estimate_high", carbon_low), carbon_low, 100000000)
+        carbon_low = self._clamp(data.get("carbon_estimate_low", 0), 0, 100_000_000)
+        carbon_high = self._clamp(data.get("carbon_estimate_high", carbon_low), carbon_low, 100_000_000)
         carbon_likely = self._clamp(
             data.get("carbon_estimate_likely", (carbon_low + carbon_high) // 2),
             carbon_low,
             carbon_high,
         )
 
-        source_findings = self._normalize_source_findings(data.get("source_findings", []), valid_evidence_ids)
+        source_findings = self._bind_source_findings(
+            data.get("source_findings", []),
+            fetch_records,
+            valid_evidence_ids,
+        )
         missing_evidence = self._normalize_string_list(data.get("missing_evidence", []), 12, 180)
 
         return {
@@ -825,41 +827,49 @@ Content Hash: {record.get("content_hash") or "not provided"}
             ),
         }
 
-    def _normalize_source_findings(self, value, valid_evidence_ids: set) -> list:
-        if not isinstance(value, list):
-            return []
-
-        valid_fetch = ("fetched", "failed", "binary")
+    def _bind_source_findings(self, model_findings, fetch_records: dict, valid_evidence_ids: set) -> list:
+        """
+        Produce one finding per fetched evidence item in order.
+        Authoritative fields (fetch_status, http_status, hash_match, fetched_domain)
+        come exclusively from fetch_records - the response objects the contract
+        observed directly. Semantic fields (source_alignment, credibility,
+        key_observation) come from the model's output for the matching evidence_id,
+        falling back to safe defaults if the model omitted or invented an entry.
+        """
         valid_alignment = ("supports", "contradicts", "mixed", "unclear")
         valid_credibility = ("high", "moderate", "low", "unknown")
-        valid_hash_match = ("match", "mismatch", "not_provided")
+
+        # Index model findings by evidence_id. Ignore any ID not in valid set
+        # (invented by the model) and keep only the first entry per ID.
+        model_by_id = {}
+        if isinstance(model_findings, list):
+            for item in model_findings:
+                if not isinstance(item, dict):
+                    continue
+                ev_id = self._clamp(item.get("evidence_id", -1), -1, MAX_EVIDENCE_PER_PROJECT)
+                if ev_id in valid_evidence_ids and ev_id not in model_by_id:
+                    model_by_id[ev_id] = item
 
         normalized = []
-        seen_ids = set()
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-
-            evidence_id = self._clamp(item.get("evidence_id", -1), -1, MAX_EVIDENCE_PER_PROJECT)
-
-            # A model cannot invent findings for evidence that was never reviewed,
-            # and duplicate findings for the same evidence id collapse to the first.
-            if evidence_id not in valid_evidence_ids or evidence_id in seen_ids:
-                continue
-            seen_ids.add(evidence_id)
-
-            normalized.append({
-                "evidence_id": evidence_id,
-                "fetch_status": self._enum(item.get("fetch_status"), valid_fetch, "failed"),
-                "http_status": self._clean(str(item.get("http_status", "unknown")), 40),
-                "hash_match": self._enum(item.get("hash_match"), valid_hash_match, "not_provided"),
-                "source_alignment": self._enum(item.get("source_alignment"), valid_alignment, "unclear"),
-                "credibility": self._enum(item.get("credibility"), valid_credibility, "unknown"),
-                "key_observation": self._clean(str(item.get("key_observation", "")), 300),
-            })
-
+        for ev_id in sorted(valid_evidence_ids):
             if len(normalized) >= MAX_SOURCE_FINDINGS:
                 break
+
+            auth = fetch_records.get(ev_id, {})
+            model = model_by_id.get(ev_id, {})
+
+            normalized.append({
+                "evidence_id": ev_id,
+                # Authoritative: from actual response, model cannot change these
+                "fetch_status": auth.get("fetch_status", "failed"),
+                "http_status": auth.get("http_status", "unknown"),
+                "hash_match": auth.get("hash_match", "not_provided"),
+                "fetched_domain": auth.get("fetched_domain", "unknown"),
+                # Semantic: from model
+                "source_alignment": self._enum(model.get("source_alignment"), valid_alignment, "unclear"),
+                "credibility": self._enum(model.get("credibility"), valid_credibility, "unknown"),
+                "key_observation": self._clean(str(model.get("key_observation", "")), 300),
+            })
 
         return normalized
 
@@ -940,14 +950,18 @@ Content Hash: {record.get("content_hash") or "not provided"}
         except Exception:
             return "unknown"
 
-    def _safe_body(self, response) -> str:
+    def _safe_raw_body(self, response):
+        """Return raw bytes from response body without any decoding."""
         try:
-            body = getattr(response, "body", "")
-            if isinstance(body, bytes):
-                return body.decode("utf-8", errors="ignore")
-            return str(body)
-        except Exception as exc:
-            return str(exc)
+            body = getattr(response, "body", None)
+            if body is None:
+                return b""
+            if isinstance(body, (bytes, bytearray)):
+                return bytes(body)
+            # String responses: encode for consistent hashing
+            return str(body).encode("utf-8", errors="replace")
+        except Exception:
+            return b""
 
     def _safe_content_type(self, response) -> str:
         try:
@@ -957,7 +971,6 @@ Content Hash: {record.get("content_hash") or "not provided"}
                 ct = headers.get("content-type", headers.get("Content-Type", ""))
             if not ct:
                 return "unknown"
-            # Strip parameters like charset
             return self._clean(str(ct).split(";")[0].strip().lower(), 80)
         except Exception:
             return "unknown"

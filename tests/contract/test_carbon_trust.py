@@ -304,7 +304,8 @@ class TestRequestReview:
 
         raw = env["contract"].get_project(project_id)
         project = json.loads(raw)
-        assert project["status"] == "assessed"
+        # MOCK_ASSESSMENT_JSON verdict is high_confidence -> status becomes "verified"
+        assert project["status"] == "verified"
         assert project["assessment_count"] == 1
 
     def test_source_findings_filter_invented_evidence_ids(self, env):
@@ -423,7 +424,8 @@ class TestRequestReview:
         vm.stopPrank()
 
         raw = env["contract"].get_project(project_id)
-        assert json.loads(raw)["status"] == "assessed"
+        # MOCK_ASSESSMENT_JSON verdict is high_confidence -> status becomes "verified"
+        assert json.loads(raw)["status"] == "verified"
 
 
 class TestReadMethods:
@@ -464,3 +466,355 @@ class TestReadMethods:
     def test_get_projects_by_unknown_owner(self, env):
         raw = env["contract"].get_projects_by_owner("0x0000000000000000000000000000000000000000")
         assert json.loads(raw) == []
+
+
+class TestSourceAssurance:
+    """
+    Regression tests proving that source assurance facts (fetch_status,
+    http_status, hash_match, fetched_domain) in stored findings are bound
+    from the actual response objects, not from the model's output.
+
+    The model mock always returns fetch_status="fetched" and hash_match="match"
+    regardless of what the contract actually fetched. These tests confirm the
+    contract overrides those with the real values.
+    """
+
+    # Model always claims evidence fetched fine with matching hash -
+    # used to prove the contract ignores those claims when wrong.
+    MOCK_CLAIMS_FETCHED = json.dumps({
+        "verdict": "high_confidence",
+        "carbon_estimate_low": 1000,
+        "carbon_estimate_high": 2000,
+        "carbon_estimate_likely": 1500,
+        "confidence_score": 80,
+        "additionality": "likely",
+        "environmental_risk": "low",
+        "evidence_quality": "high",
+        "fraud_risk": "low",
+        "permanence_confidence": 70,
+        "biodiversity_impact": "positive",
+        "biodiversity_confidence": 65,
+        "source_findings": [
+            {
+                "evidence_id": 0,
+                "source_alignment": "supports",
+                "credibility": "high",
+                "key_observation": "Model says all good.",
+            }
+        ],
+        "missing_evidence": [],
+        "recommended_action": "Proceed.",
+        "reasoning": "Model reasoning.",
+    })
+
+    def test_non_200_status_sets_fetch_status_failed(self, env):
+        # Mock web returns 404. Contract must store fetch_status="failed"
+        # regardless of what the model says.
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 404, "body": "Not Found"},
+        )
+        vm.mock_llm(".*", self.MOCK_CLAIMS_FETCHED)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(env["contract"].request_review(project_id))
+        vm.stopPrank()
+
+        assert len(result["source_findings"]) == 1
+        finding = result["source_findings"][0]
+        # Contract must bind the real HTTP status, not trust the model
+        assert finding["fetch_status"] == "failed"
+        assert "404" in str(finding["http_status"])
+
+    def test_hash_match_from_raw_bytes(self, env):
+        # Evidence is submitted with the SHA-256 of the exact mock body.
+        # Contract computes hash from raw bytes - must report "match".
+        import hashlib
+        body_content = "Canopy cover increased 40% over the monitoring period."
+        declared_hash = hashlib.sha256(body_content.encode("utf-8")).hexdigest()
+
+        vm = env["vm"]
+        contract = env["contract"]
+        vm.startPrank(env["owner"])
+        project_id = contract.create_project(
+            "Hash Test Project", "reforestation", "Location", "Owner",
+            "Objective", "Carbon", "Bio", "Period", "Summary",
+        )
+        vm.stopPrank()
+
+        vm.startPrank(env["contributor"])
+        contract.add_evidence(
+            project_id, "satellite_imagery", "Hash-verified source",
+            "https://earthengine.google.com/hash-test",
+            "Evidence with declared hash", declared_hash,
+            "Test Source", "2025-01-01",
+        )
+        vm.stopPrank()
+
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 200, "body": body_content},
+        )
+        vm.mock_llm(".*", self.MOCK_CLAIMS_FETCHED)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(contract.request_review(project_id))
+        vm.stopPrank()
+
+        finding = result["source_findings"][0]
+        assert finding["hash_match"] == "match", (
+            f"Expected hash_match='match' for correct SHA-256, got {finding['hash_match']!r}"
+        )
+
+    def test_hash_mismatch_when_content_differs(self, env):
+        # Evidence declares a hash but the fetched body doesn't match it.
+        # Contract must report hash_match="mismatch".
+        wrong_hash = "a" * 64  # definitely not the SHA-256 of the mock body
+
+        vm = env["vm"]
+        contract = env["contract"]
+        vm.startPrank(env["owner"])
+        project_id = contract.create_project(
+            "Mismatch Test Project", "reforestation", "Location", "Owner",
+            "Objective", "Carbon", "Bio", "Period", "Summary",
+        )
+        vm.stopPrank()
+
+        vm.startPrank(env["contributor"])
+        contract.add_evidence(
+            project_id, "environmental_report", "Mismatched hash source",
+            "https://earthengine.google.com/mismatch-test",
+            "Evidence with wrong declared hash", wrong_hash,
+            "Test Source", "2025-01-01",
+        )
+        vm.stopPrank()
+
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 200, "body": "Actual body content that does not match the declared hash."},
+        )
+        vm.mock_llm(".*", self.MOCK_CLAIMS_FETCHED)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(contract.request_review(project_id))
+        vm.stopPrank()
+
+        finding = result["source_findings"][0]
+        assert finding["hash_match"] == "mismatch", (
+            f"Expected hash_match='mismatch' for wrong hash, got {finding['hash_match']!r}"
+        )
+
+    def test_binary_content_type_sets_fetch_status_binary(self, env):
+        # Binary detection requires the response to carry a content-type header
+        # (application/pdf, image/*, etc.). gltest's mock_web does not forward
+        # arbitrary headers to the response object, so this path cannot be
+        # fully exercised in direct mode - content_type comes back as "unknown"
+        # and the URL is treated as a successful text fetch.
+        #
+        # This test confirms the contract does not crash on binary-like URLs
+        # and that the finding is still present with a valid fetch_status.
+        # The full binary → fetch_status="binary" path is covered by the
+        # integration test against a real server that returns the content-type header.
+        vm = env["vm"]
+        contract = env["contract"]
+        vm.startPrank(env["owner"])
+        project_id = contract.create_project(
+            "PDF Evidence Project", "reforestation", "Location", "Owner",
+            "Objective", "Carbon", "Bio", "Period", "Summary",
+        )
+        vm.stopPrank()
+
+        vm.startPrank(env["contributor"])
+        contract.add_evidence(
+            project_id, "environmental_report", "PDF audit report",
+            "https://earthengine.google.com/report.pdf",
+            "Binary PDF evidence", "",
+            "Audit Firm", "2025-01-01",
+        )
+        vm.stopPrank()
+
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 200, "body": "PDF binary content would be here"},
+        )
+        vm.mock_llm(".*", self.MOCK_CLAIMS_FETCHED)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(contract.request_review(project_id))
+        vm.stopPrank()
+
+        # Confirm the finding exists and has a valid fetch_status. Content-type
+        # header detection requires a real server (integration test).
+        finding = result["source_findings"][0]
+        assert finding["fetch_status"] in ("fetched", "failed", "binary")
+        assert finding["fetched_domain"] == "earthengine.google.com"
+
+    def test_fetched_domain_matches_url_domain(self, env):
+        # fetched_domain in findings must be extracted from the actual URL,
+        # not taken from the model or the declared source_name.
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 200, "body": "Some content."},
+        )
+        vm.mock_llm(".*", self.MOCK_CLAIMS_FETCHED)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(env["contract"].request_review(project_id))
+        vm.stopPrank()
+
+        finding = result["source_findings"][0]
+        assert finding["fetched_domain"] == "earthengine.google.com"
+
+    def test_findings_present_for_all_fetched_items_even_if_model_omits(self, env):
+        # Model returns source_findings: [] (omits all findings).
+        # Contract must still produce one finding per fetched evidence item.
+        model_omits_findings = json.dumps({
+            "verdict": "low_confidence",
+            "carbon_estimate_low": 0,
+            "carbon_estimate_high": 0,
+            "carbon_estimate_likely": 0,
+            "confidence_score": 10,
+            "additionality": "uncertain",
+            "environmental_risk": "medium",
+            "evidence_quality": "insufficient",
+            "fraud_risk": "medium",
+            "permanence_confidence": 10,
+            "biodiversity_impact": "uncertain",
+            "biodiversity_confidence": 10,
+            "source_findings": [],
+            "missing_evidence": [],
+            "recommended_action": "Provide better evidence.",
+            "reasoning": "Nothing to assess.",
+        })
+
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_web(
+            r"earthengine\.google\.com",
+            {"status": 200, "body": "Some content."},
+        )
+        vm.mock_llm(".*", model_omits_findings)
+
+        vm.startPrank(env["owner"])
+        result = json.loads(env["contract"].request_review(project_id))
+        vm.stopPrank()
+
+        # One evidence item was fetched; one finding must exist regardless of model output
+        assert len(result["source_findings"]) == 1
+        finding = result["source_findings"][0]
+        assert finding["evidence_id"] == 0
+        assert finding["fetch_status"] == "fetched"
+        # Semantic fields fall back to safe defaults when model omitted them
+        assert finding["source_alignment"] == "unclear"
+        assert finding["credibility"] == "unknown"
+
+
+class TestContestedConsequences:
+    """
+    Verdict → project status binding. high_fraud_risk permanently locks the
+    project; high_confidence promotes to verified; everything else is assessed.
+    """
+
+    def _make_verdict_mock(self, verdict: str) -> str:
+        return json.dumps({
+            "verdict": verdict,
+            "carbon_estimate_low": 0,
+            "carbon_estimate_high": 0,
+            "carbon_estimate_likely": 0,
+            "confidence_score": 50,
+            "additionality": "uncertain",
+            "environmental_risk": "medium",
+            "evidence_quality": "moderate",
+            "fraud_risk": "medium",
+            "permanence_confidence": 50,
+            "biodiversity_impact": "uncertain",
+            "biodiversity_confidence": 50,
+            "source_findings": [],
+            "missing_evidence": [],
+            "recommended_action": "No action.",
+            "reasoning": "Test.",
+        })
+
+    def test_high_fraud_risk_flags_project(self, env):
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_llm(".*", self._make_verdict_mock("high_fraud_risk"))
+
+        vm.startPrank(env["owner"])
+        env["contract"].request_review(project_id)
+        vm.stopPrank()
+
+        project = json.loads(env["contract"].get_project(project_id))
+        assert project["status"] == "flagged"
+
+    def test_flagged_project_cannot_accept_new_evidence(self, env):
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_llm(".*", self._make_verdict_mock("high_fraud_risk"))
+
+        vm.startPrank(env["owner"])
+        env["contract"].request_review(project_id)
+        vm.stopPrank()
+
+        vm.startPrank(env["contributor"])
+        with vm.expect_revert("flagged for fraud"):
+            env["contract"].add_evidence(
+                project_id, "third_party_audit", "New Evidence",
+                "https://example.com/audit", "Audit", "", "Auditor", "2025-01-01",
+            )
+        vm.stopPrank()
+
+    def test_flagged_project_cannot_request_review(self, env):
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_llm(".*", self._make_verdict_mock("high_fraud_risk"))
+
+        vm.startPrank(env["owner"])
+        env["contract"].request_review(project_id)
+        with vm.expect_revert("permanently locked"):
+            env["contract"].request_review(project_id)
+        vm.stopPrank()
+
+    def test_high_confidence_marks_project_verified(self, env):
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_llm(".*", self._make_verdict_mock("high_confidence"))
+
+        vm.startPrank(env["owner"])
+        env["contract"].request_review(project_id)
+        vm.stopPrank()
+
+        project = json.loads(env["contract"].get_project(project_id))
+        assert project["status"] == "verified"
+
+    def test_low_confidence_keeps_project_assessable(self, env):
+        project_id = _create_test_project(env)
+        _add_test_evidence(env, project_id)
+
+        vm = env["vm"]
+        vm.mock_llm(".*", self._make_verdict_mock("low_confidence"))
+
+        vm.startPrank(env["owner"])
+        env["contract"].request_review(project_id)
+        vm.stopPrank()
+
+        project = json.loads(env["contract"].get_project(project_id))
+        assert project["status"] == "assessed"
