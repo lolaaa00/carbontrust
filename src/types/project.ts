@@ -19,4 +19,10 @@ export interface Project {
   created_at?: string;
 }
 
-export type ProjectStatus = "created" | "evidence_submitted" | "review_requested" | "assessed";
+export type ProjectStatus =
+  | "created"
+  | "evidence_submitted"
+  | "review_requested"
+  | "assessed"
+  | "verified"
+  | "flagged";

@@ -75,7 +75,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const canRequestReview =
     project &&
     isOwner &&
-    (project.status === "evidence_submitted" || project.status === "assessed") &&
+    (project.status === "evidence_submitted" ||
+      project.status === "assessed" ||
+      project.status === "verified") &&
     project.evidence_count >= 1;
 
   const handleRequestReview = async () => {
@@ -126,12 +128,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 Request AI Review
               </Button>
             )}
-            <Button variant="outline" asChild>
-              <Link href={`/projects/${id}/evidence`}>
-                <Plus className="mr-2 h-4 w-4" />
-                Add Evidence
-              </Link>
-            </Button>
+            {project.status !== "flagged" && (
+              <Button variant="outline" asChild>
+                <Link href={`/projects/${id}/evidence`}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  Add Evidence
+                </Link>
+              </Button>
+            )}
             {isOwner && (
               <Button variant="outline" asChild>
                 <Link href={`/projects/${id}/monitoring`}>
@@ -143,6 +147,17 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           </div>
         }
       />
+
+      {project.status === "flagged" && (
+        <Card className="mb-6 border-destructive">
+          <CardContent className="p-4">
+            <p className="text-sm text-destructive font-medium">
+              This project has been flagged for high fraud risk by independent validator consensus.
+              No further evidence submissions or review requests are permitted.
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {reviewStatus !== "idle" && (
         <Card className="mb-6">

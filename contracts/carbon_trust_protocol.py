@@ -1,9 +1,10 @@
-# v0.2.18
+# v0.3.0
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
 
 from genlayer import *
 from dataclasses import dataclass
 import json
+import hashlib
 
 
 VALID_PROJECT_TYPES = [
@@ -171,6 +172,8 @@ class CarbonTrustProtocol(gl.Contract):
 
         if project["status"] == "review_requested":
             raise gl.vm.UserError("EXPECTED: Cannot add evidence while review is in progress")
+        if project["status"] == "flagged":
+            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud risk and is locked")
 
         evidence_type = self._clean(evidence_type, 80)
         title = self._clean(title, MAX_TITLE_LENGTH)
@@ -290,7 +293,9 @@ class CarbonTrustProtocol(gl.Contract):
         if project["owner"] != sender:
             raise gl.vm.UserError("EXPECTED: Only the project owner can request review")
 
-        if project["status"] not in ("evidence_submitted", "assessed"):
+        if project["status"] == "flagged":
+            raise gl.vm.UserError("EXPECTED: This project has been flagged for fraud risk and cannot be re-reviewed")
+        if project["status"] not in ("evidence_submitted", "assessed", "verified"):
             raise gl.vm.UserError("EXPECTED: Project must have evidence submitted before review")
 
         if int(project["evidence_count"]) < 1:
@@ -318,7 +323,17 @@ class CarbonTrustProtocol(gl.Contract):
 
         project["assessment_count"] = len(assessment_list)
         project["latest_assessment_id"] = assessment_id
-        project["status"] = "assessed"
+
+        verdict = assessment.get("verdict", "")
+        if verdict == "high_fraud_risk":
+            # Fraud verdict is a contested consequence: project is permanently locked.
+            # No further evidence or re-review is permitted once validators agree on fraud.
+            project["status"] = "flagged"
+        elif verdict == "high_confidence":
+            project["status"] = "verified"
+        else:
+            project["status"] = "assessed"
+
         self.projects[u256(pid)] = self._json(project)
 
         return self._json(assessment)
@@ -380,15 +395,18 @@ class CarbonTrustProtocol(gl.Contract):
             fetch_limit = min(len(evidence_list), MAX_FETCH_PER_REVIEW)
             for i in range(fetch_limit):
                 ev = evidence_list[i]
-                fetched = self._fetch_public_evidence(ev["url"])
+                fetched = self._fetch_public_evidence(ev["url"], ev.get("content_hash", ""))
                 fetched_items.append({
                     "evidence_id": ev["evidence_id"],
                     "evidence_type": ev["evidence_type"],
                     "title": ev["title"],
-                    "source_name": ev["source_name"],
+                    "declared_source_name": ev["source_name"],
                     "url": ev["url"],
                     "fetch_status": fetched["fetch_status"],
                     "http_status": fetched["http_status"],
+                    "content_type": fetched["content_type"],
+                    "fetched_domain": fetched["fetched_domain"],
+                    "hash_match": fetched["hash_match"],
                     "content_excerpt": fetched["content_excerpt"],
                 })
 
@@ -494,8 +512,25 @@ verdict:
 - insufficient_evidence
 - high_fraud_risk
 
+SOURCE ASSURANCE RULES
+- HTTP Status: A non-200 HTTP Status means the evidence URL was not publicly accessible at
+  review time. Treat that evidence item as failed regardless of what the submitter claims.
+  A 4xx means the URL is broken or access-denied; a 5xx means a server fault. Both reduce
+  credibility to unknown and evidence quality toward insufficient.
+- Content Hash Verification: If hash_match is "mismatch", the fetched content does not match
+  what the submitter declared. This may indicate tampering or link rot. Reduce credibility and
+  flag in source_findings. If hash_match is "match", the content is confirmed unchanged from
+  what was declared. If hash_match is "not_provided", no integrity check was possible.
+- Source Identity: Compare Declared Source Name against Fetched Domain. If they are clearly
+  inconsistent (e.g., declared "NASA Satellite Data" but fetched domain is a personal blog),
+  that is a credibility flag. Consistent alignment (e.g., "Wikipedia" with en.wikipedia.org)
+  supports credibility.
+- Binary Content: A fetch_status of "binary" means the file is a PDF or image that could not
+  be read as text. Only the hash_match result provides integrity assurance. Without a matching
+  hash, binary evidence must be treated as unverifiable and credibility set to unknown.
+
 IMPORTANT RULES
-- If evidence URLs are mostly unfetchable, reduce evidence quality and confidence.
+- If evidence URLs are mostly unfetchable or returned non-200, reduce evidence quality and confidence.
 - If claims are large but evidence is vague, use conservative carbon estimates.
 - If evidence conflicts, preserve the uncertainty in reasoning.
 - Do not invent facts that are not in the submitted metadata or fetched evidence.
@@ -519,7 +554,9 @@ OUTPUT JSON SCHEMA
   "source_findings": [
     {{
       "evidence_id": <int>,
-      "fetch_status": "<fetched|failed>",
+      "fetch_status": "<fetched|failed|binary>",
+      "http_status": "<e.g. 200, 404, error>",
+      "hash_match": "<match|mismatch|not_provided>",
       "source_alignment": "<supports|contradicts|mixed|unclear>",
       "credibility": "<high|moderate|low|unknown>",
       "key_observation": "<short observation>"
@@ -559,29 +596,75 @@ Mandatory equivalence rules:
 
         return self._parse_assessment(raw_result, valid_evidence_ids)
 
-    def _fetch_public_evidence(self, url: str) -> dict:
+    def _fetch_public_evidence(self, url: str, declared_content_hash: str = "") -> dict:
+        domain = self._extract_domain(url)
         try:
             response = gl.nondet.web.get(url)
             status = self._safe_status(response)
+            status_code = self._parse_status_code(status)
+            content_type = self._safe_content_type(response)
             body = self._safe_body(response)
-            excerpt = self._clean(body, MAX_FETCH_CHARS_PER_EVIDENCE)
 
+            # Hash verification: compare declared hash against actual fetched bytes.
+            hash_match = "not_provided"
+            if declared_content_hash:
+                actual_hash = hashlib.sha256(body.encode("utf-8", errors="ignore")).hexdigest()
+                hash_match = "match" if actual_hash == declared_content_hash.lower() else "mismatch"
+
+            # Non-200 means the URL is not properly accessible; treat as failed
+            # regardless of whether a body was returned.
+            if status_code is not None and status_code != 200:
+                return {
+                    "fetch_status": "failed",
+                    "http_status": status,
+                    "content_type": content_type,
+                    "fetched_domain": domain,
+                    "hash_match": hash_match,
+                    "content_excerpt": (
+                        f"HTTP {status_code} response: evidence URL is not publicly accessible."
+                    ),
+                }
+
+            # Binary content (PDFs, images) cannot be read as text.
+            if self._is_binary_content_type(content_type):
+                return {
+                    "fetch_status": "binary",
+                    "http_status": status,
+                    "content_type": content_type,
+                    "fetched_domain": domain,
+                    "hash_match": hash_match,
+                    "content_excerpt": (
+                        f"Binary content ({content_type}): text extraction is not supported. "
+                        "The hash match result above is the integrity check for this file."
+                    ),
+                }
+
+            excerpt = self._clean(body, MAX_FETCH_CHARS_PER_EVIDENCE)
             if not excerpt:
                 return {
                     "fetch_status": "failed",
                     "http_status": status,
+                    "content_type": content_type,
+                    "fetched_domain": domain,
+                    "hash_match": hash_match,
                     "content_excerpt": "No readable body was returned from this URL.",
                 }
 
             return {
                 "fetch_status": "fetched",
                 "http_status": status,
+                "content_type": content_type,
+                "fetched_domain": domain,
+                "hash_match": hash_match,
                 "content_excerpt": excerpt,
             }
         except Exception as exc:
             return {
                 "fetch_status": "failed",
                 "http_status": "error",
+                "content_type": "unknown",
+                "fetched_domain": domain,
+                "hash_match": "not_provided",
                 "content_excerpt": self._clean(str(exc), 500),
             }
 
@@ -653,10 +736,13 @@ Content Hash: {ev.get("content_hash") or "not provided"}
 Evidence ID: {item.get("evidence_id")}
 Type: {item.get("evidence_type")}
 Title: {item.get("title")}
-Source Name: {item.get("source_name")}
+Declared Source Name: {item.get("declared_source_name")}
 URL: {item.get("url")}
+Fetched Domain: {item.get("fetched_domain")}
 Fetch Status: {item.get("fetch_status")}
 HTTP Status: {item.get("http_status")}
+Content Type: {item.get("content_type")}
+Content Hash Verification: {item.get("hash_match")}
 Fetched Content Excerpt:
 {item.get("content_excerpt")}
 """
@@ -743,9 +829,10 @@ Content Hash: {record.get("content_hash") or "not provided"}
         if not isinstance(value, list):
             return []
 
-        valid_fetch = ("fetched", "failed")
+        valid_fetch = ("fetched", "failed", "binary")
         valid_alignment = ("supports", "contradicts", "mixed", "unclear")
         valid_credibility = ("high", "moderate", "low", "unknown")
+        valid_hash_match = ("match", "mismatch", "not_provided")
 
         normalized = []
         seen_ids = set()
@@ -764,6 +851,8 @@ Content Hash: {record.get("content_hash") or "not provided"}
             normalized.append({
                 "evidence_id": evidence_id,
                 "fetch_status": self._enum(item.get("fetch_status"), valid_fetch, "failed"),
+                "http_status": self._clean(str(item.get("http_status", "unknown")), 40),
+                "hash_match": self._enum(item.get("hash_match"), valid_hash_match, "not_provided"),
                 "source_alignment": self._enum(item.get("source_alignment"), valid_alignment, "unclear"),
                 "credibility": self._enum(item.get("credibility"), valid_credibility, "unknown"),
                 "key_observation": self._clean(str(item.get("key_observation", "")), 300),
@@ -859,6 +948,45 @@ Content Hash: {record.get("content_hash") or "not provided"}
             return str(body)
         except Exception as exc:
             return str(exc)
+
+    def _safe_content_type(self, response) -> str:
+        try:
+            ct = getattr(response, "content_type", None)
+            if ct is None:
+                headers = getattr(response, "headers", {}) or {}
+                ct = headers.get("content-type", headers.get("Content-Type", ""))
+            if not ct:
+                return "unknown"
+            # Strip parameters like charset
+            return self._clean(str(ct).split(";")[0].strip().lower(), 80)
+        except Exception:
+            return "unknown"
+
+    def _is_binary_content_type(self, content_type: str) -> bool:
+        binary_prefixes = (
+            "application/pdf",
+            "image/",
+            "video/",
+            "audio/",
+            "application/octet-stream",
+            "application/zip",
+        )
+        ct = content_type.lower()
+        return any(ct.startswith(p) for p in binary_prefixes)
+
+    def _parse_status_code(self, status_str: str):
+        try:
+            return int(str(status_str).strip())
+        except Exception:
+            return None
+
+    def _extract_domain(self, url: str) -> str:
+        try:
+            stripped = url.split("://", 1)[-1]
+            domain = stripped.split("/")[0].split("?")[0].split("#")[0]
+            return domain.lower() or "unknown"
+        except Exception:
+            return "unknown"
 
     def _clamp(self, value, lo: int, hi: int) -> int:
         try:

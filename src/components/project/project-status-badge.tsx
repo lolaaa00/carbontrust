@@ -3,11 +3,16 @@
 import { Badge } from "@/components/ui/badge";
 import type { ProjectStatus } from "@/types/project";
 
-const STATUS_VARIANT: Record<ProjectStatus, "secondary" | "warning" | "default" | "success"> = {
+const STATUS_VARIANT: Record<
+  ProjectStatus,
+  "secondary" | "warning" | "default" | "success" | "destructive"
+> = {
   created: "secondary",
   evidence_submitted: "warning",
   review_requested: "default",
   assessed: "success",
+  verified: "success",
+  flagged: "destructive",
 };
 
 function formatStatusLabel(status: string): string {

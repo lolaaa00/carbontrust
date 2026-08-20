@@ -67,8 +67,8 @@ validators voting MAJORITY_AGREE → ACCEPTED**.
 
 - **Live app:** https://carbontrust0.vercel.app
 - **GitHub (full source):** https://github.com/lolaaa00/carbontrust
-- **Deployed contract:** `0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6`
-- **Explorer:** https://explorer-studio.genlayer.com/address/0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6
+- **Deployed contract:** `0x024a1A94060BF56Ec36F219CD9f665ABF820d094`
+- **Explorer:** https://explorer-studio.genlayer.com/address/0x024a1A94060BF56Ec36F219CD9f665ABF820d094
 - **Decision record:** [docs/DECISION_RECORD.md](docs/DECISION_RECORD.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Contract reference:** [docs/CONTRACT.md](docs/CONTRACT.md)

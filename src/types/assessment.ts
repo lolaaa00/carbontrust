@@ -1,6 +1,8 @@
 export interface SourceFinding {
   evidence_id: number;
-  fetch_status: "fetched" | "failed";
+  fetch_status: "fetched" | "failed" | "binary";
+  http_status?: string;
+  hash_match?: "match" | "mismatch" | "not_provided";
   source_alignment: "supports" | "contradicts" | "mixed" | "unclear";
   credibility: "high" | "moderate" | "low" | "unknown";
   key_observation: string;

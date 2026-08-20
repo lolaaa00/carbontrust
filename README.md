@@ -94,9 +94,9 @@ with a Retry action, not failures — nothing was written in those cases.
 - Anyone can attach public evidence to any project — not just the owner. Evidence
   types include `third_party_audit` and `community_observation`, which only make
   sense coming from someone other than the project owner
-- Attach public evidence with optional content hashes (stored and shown to the
-  model as claimed metadata; not independently verified against fetched bytes —
-  see Honest limits)
+- Attach public evidence with optional SHA-256 content hashes — the contract
+  fetches each URL and verifies the hash against the actual body bytes at review
+  time, surfacing `match`, `mismatch`, or `not_provided` per source finding
 - Owner-only: attach ongoing monitoring records against a project over time
   (`/projects/[id]/monitoring`), shown on a dedicated Monitoring tab
 - Owner-only: request AI-validator consensus assessments
@@ -131,7 +131,7 @@ The supplied `.env.example` configures:
 - GenLayer StudioNet RPC
 - Chain ID `61999`
 - GenLayer explorer
-- Deployed CarbonTrust contract: `0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6`
+- Deployed CarbonTrust contract: `0x024a1A94060BF56Ec36F219CD9f665ABF820d094`
   ([view on explorer](https://explorer-studio.genlayer.com))
 
 Use a test-only wallet when interacting with StudioNet.
@@ -220,14 +220,10 @@ schema matches the frontend exactly (`npm run verify:schema`).
 
 ## Honest limits
 
-- **No live frontend URL yet.** The contract is deployed to StudioNet (address
-  above); the frontend has not yet been deployed to Vercel and verified end to
-  end on a public URL. Deploy steps are in
-  [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
-- **Content hashes aren't verified.** `content_hash` on evidence and monitoring
-  records is stored and shown to the model as claimed metadata, but nothing in
-  the contract computes a hash of the fetched body and compares it — treat it
-  as a claim, not a proof, until that's added.
+- **Content hash verification covers only text-readable responses.** For binary
+  responses (PDFs, images), the contract records `fetch_status: "binary"` and
+  reports the hash match result, but cannot extract text. Binary evidence with a
+  matching hash is integrity-confirmed but semantically unreadable by the model.
 - **No demo video or public post yet.**
 - **StudioNet's 30 req/min rate limit is real and unannounced.** A user
   performing several operations in quick succession (or a frontend polling
