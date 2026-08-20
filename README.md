@@ -131,7 +131,7 @@ The supplied `.env.example` configures:
 - GenLayer StudioNet RPC
 - Chain ID `61999`
 - GenLayer explorer
-- Deployed CarbonTrust contract: `0x024a1A94060BF56Ec36F219CD9f665ABF820d094`
+- Deployed CarbonTrust contract: `0x75cD4D068C6f15e780f6c6e6d8c32Fca26b3045F`
   ([view on explorer](https://explorer-studio.genlayer.com))
 
 Use a test-only wallet when interacting with StudioNet.
