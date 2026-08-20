@@ -28,73 +28,68 @@ be reduced to a regex or a price feed. The full gate-by-gate reasoning,
 including the alternative ideas (several of them value-bearing) this was
 chosen over, is in [docs/DECISION_RECORD.md](docs/DECISION_RECORD.md).
 
-## Reviewer feedback — corrections made (v0.3.0)
+## Reviewer feedback — corrections made
 
-The team requested improvements to source assurance: verify response status,
-content hashes, source identity, and binary evidence before presenting the
-assessment as source-attested, and connect the agreed result to a concrete
-contested consequence. All four were addressed and redeployed.
+The team requested: verify response status, content hashes, source identity,
+and binary evidence before presenting the assessment as source-attested, and
+connect the agreed result to a concrete contested consequence.
 
-### HTTP response status verification
+### The architectural fix
 
-**Before:** Non-200 responses passed through as "fetched" regardless of status
-code. The model received the body (or an empty string) with no penalty applied.
+The core problem was that fetch facts (`fetch_status`, `http_status`,
+`hash_match`) were being asked of the model inside `exec_prompt` — the model
+could omit or rewrite them. The fix is structural:
 
-**After:** The HTTP status code is now parsed. Any non-200 response immediately
-sets `fetch_status: "failed"` with a clear error message. The model prompt
-includes explicit scoring rules: 4xx means broken/access-denied (credibility:
-unknown), 5xx means server fault — both reduce evidence quality toward
-insufficient.
+Inside the `evaluate()` closure, all evidence URLs are fetched first. The
+response objects are used to compute a `fetch_records` dict of authoritative
+facts **before** the model is called. After `exec_prompt` returns,
+`_bind_source_findings()` overwrites the model's source_findings with the
+values from `fetch_records`. The model can only influence semantic fields
+(`source_alignment`, `credibility`, `key_observation`) — it cannot override
+what the contract actually observed.
 
-### Content hash verification
+### HTTP response status
 
-**Before:** `content_hash` on evidence records was stored on-chain and shown to
-the model as claimed metadata. Nothing verified it against the actual fetched
-bytes.
+Non-200 responses immediately set `fetch_status: "failed"` with a clear
+message. The model prompt includes explicit scoring rules: 4xx = broken or
+access-denied, 5xx = server fault, both reduce credibility to unknown.
+**The stored finding always reflects the real HTTP status, not the model's
+claim about it.**
 
-**After:** At fetch time, the contract SHA-256-hashes the actual response body
-and compares it to the declared hash. Each source finding in the assessment now
-carries `hash_match: match | mismatch | not_provided`. A mismatch signals
-tampering or link rot and is surfaced to the model as a credibility flag. The
-UI renders hash match results in the Source Assurance section of every
-assessment.
+### Content hash from raw bytes
 
-### Source identity cross-check
+`content_hash` on evidence records is now verified against the actual fetched
+body. The hash is computed via `_safe_raw_body()` which returns raw bytes
+**before** any UTF-8 decoding — computing the hash from already-decoded text
+would produce a different result than a hash declared against the raw file.
+Each source finding carries `hash_match: match | mismatch | not_provided`.
+A mismatch signals tampering or link rot. **The hash result comes from the
+response object, not from the model.**
 
-**Before:** The submitter-declared `source_name` (e.g. "NASA Satellite Data")
-was shown to the model but never checked against what was actually fetched.
+### Source identity
 
-**After:** The domain of the fetched URL is extracted and surfaced alongside the
-declared source name in the model's prompt. The model is explicitly instructed
-to treat clear mismatches (e.g. declared "NASA" but fetched from a personal
-blog) as a credibility flag.
+The domain of the fetched URL is extracted from the actual URL and stored as
+`fetched_domain` in every finding. It is surfaced to the model in the prompt
+so it can reason about mismatches (declared "NASA Satellite Data" but fetched
+from a personal blog), but the domain value in the stored finding is bound
+from the URL — the model cannot change it.
 
 ### Binary evidence (PDFs, images)
 
-**Before:** PDFs and images returned binary bytes that `_safe_body` decoded as
-garbled text or an empty string, silently. The model had no way to know the
-content was unreadable.
-
-**After:** Content-Type is read from the response. Binary responses (PDF,
-image/*, audio/*, video/*, octet-stream) get `fetch_status: "binary"` — text
-extraction is skipped, the hash match still runs as the sole integrity check,
-and the model prompt addresses binary evidence scoring explicitly: without a
-matching hash, binary evidence must be treated as unverifiable (credibility:
-unknown).
+Content-Type is read from the response. Binary responses (PDF, image/*,
+audio/*, video/*, octet-stream) get `fetch_status: "binary"` — text extraction
+is skipped, the hash match still runs as the sole integrity check, and the
+model prompt addresses binary evidence scoring explicitly: without a matching
+hash, binary evidence must be treated as unverifiable (credibility: unknown).
 
 ### Concrete contested consequence
 
-**Before:** Every project ended in `status: "assessed"` regardless of verdict.
-The consensus result was written to storage and displayed, but nothing changed
-in response to it.
-
-**After:** `request_review` now sets project status based on the agreed verdict:
+`request_review` now sets project status based on the agreed verdict:
 
 - `high_confidence` → `verified`
 - `high_fraud_risk` → `flagged` — permanently locked. No further evidence
-  submissions or re-review requests are permitted once validators agree on
-  fraud. The UI shows a fraud banner and hides Add Evidence on flagged
-  projects.
+  submissions, monitoring records, or re-review requests are permitted. The UI
+  shows a fraud banner and hides Add Evidence on flagged projects.
 - All other verdicts → `assessed` (retryable with new evidence)
 
 ## How to use it
@@ -137,8 +132,8 @@ MAJORITY_AGREE → ACCEPTED**.
 
 - **Live app:** https://carbontrust0.vercel.app
 - **GitHub (full source):** https://github.com/lolaaa00/carbontrust
-- **Deployed contract (v0.3.0):** `0x024a1A94060BF56Ec36F219CD9f665ABF820d094`
-- **Explorer:** https://explorer-studio.genlayer.com/address/0x024a1A94060BF56Ec36F219CD9f665ABF820d094
+- **Deployed contract:** `0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6`
+- **Explorer:** https://explorer-studio.genlayer.com/address/0x6B83B4f0c9584D631525eD109d72E613aCF7b3F6
 - **Decision record:** [docs/DECISION_RECORD.md](docs/DECISION_RECORD.md)
 - **Architecture:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 - **Contract reference:** [docs/CONTRACT.md](docs/CONTRACT.md)
@@ -146,31 +141,37 @@ MAJORITY_AGREE → ACCEPTED**.
 ## Tests
 
 - `genvm-lint`: clean, 0 errors (11 methods, 4 write / 7 view)
-- 30/30 direct-mode contract tests passing (`tests/contract/`) — including
-  invented-evidence-ID filtering, fetch path with `mock_web`, and graceful
-  failure on unmocked fetches
+- **41/41** direct-mode contract tests passing (`tests/contract/`) — including:
+  - `TestSourceAssurance`: 404 response forces `fetch_status: failed` regardless
+    of model output; SHA-256 from raw bytes gives `hash_match: match`;
+    wrong declared hash gives `hash_match: mismatch`; `fetched_domain` matches
+    URL domain not model claim; findings present for all fetched items even when
+    model omits them entirely
+  - `TestContestedConsequences`: `high_fraud_risk` → `flagged` + evidence lock;
+    `high_confidence` → `verified`; flagged project rejects re-review
 - 1/1 integration test passing against real StudioNet consensus
   (`tests/integration/`), 229.63s, real validators, real URL fetch
 - `npm run verify:schema`: every frontend call matches the deployed contract
 
 ## Honest limits
 
-- **Binary content hash covers integrity, not semantics.** For PDFs and images,
-  the contract records `fetch_status: "binary"` and runs the hash check. A
-  matching hash confirms the file has not changed since it was declared; it does
-  not tell the model what the file contains.
+- **Binary content-type detection requires a real server.** `gltest`'s
+  `mock_web` does not forward `content-type` headers to the response object,
+  so `fetch_status: "binary"` is verified in the integration test (real server)
+  rather than direct mode. The contract logic is in place and tested with real
+  responses.
 - **Native GEN is not used.** A deliberate scope choice explained in the
   decision record, with the natural extension (escrow tied to verdicts) named
   there.
 - **StudioNet's 30 req/min rate limit is real and undocumented.** Discovered by
-  hitting it directly during integration testing. The frontend does not yet show
-  a friendly message if a user's actions trigger it.
+  hitting it directly during integration testing. The frontend does not yet
+  show a friendly message if a user's actions trigger it.
 - **No demo video yet.**
 
 ---
 
-*Contract redeployed to v0.3.0 at the address above after addressing all
-reviewer feedback on source assurance. Prior version (v0.2.18) was itself a
-redeploy after fixes found by running real infrastructure tests: an
-access-control bug where evidence submission was incorrectly owner-only, and
-Unicode characters in contract comments that broke schema fetch over the wire.*
+*Contract source at `contracts/carbon_trust_protocol.py`. The source assurance
+architecture — `_fetch_with_assurance` computing authoritative facts from raw
+responses, `_bind_source_findings` overriding model output with those facts —
+is the core of what makes the assessment source-attested rather than
+model-reported.*
