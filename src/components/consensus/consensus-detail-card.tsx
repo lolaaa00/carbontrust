@@ -135,6 +135,9 @@ function SourceFindingRow({ finding }: { finding: SourceFinding }) {
         {finding.http_status && finding.fetch_status !== "fetched" && (
           <span className="text-muted-foreground">HTTP {finding.http_status}</span>
         )}
+        {finding.fetched_domain && (
+          <span className="text-muted-foreground font-mono">{finding.fetched_domain}</span>
+        )}
         <span className={hashInfo.className}>{hashInfo.label}</span>
         <span className={alignmentColor}>{finding.source_alignment}</span>
         <Badge variant="outline" className="text-xs py-0">
